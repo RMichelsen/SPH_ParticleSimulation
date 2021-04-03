@@ -1,0 +1,71 @@
+#pragma kernel ResetPrefixSumsAndBins
+#pragma kernel DistributeParticles
+#pragma kernel CalculatePrefixSums
+#pragma kernel CopyParticles
+#pragma kernel CopyBoundaryParticles
+
+struct Particle {
+    int bin;
+    int index;
+};
+
+globallycoherent RWStructuredBuffer<Particle> particles;
+RWStructuredBuffer<Particle> sorted_particles;
+RWStructuredBuffer<float3> positions;
+RWStructuredBuffer<float3> sorted_positions;
+RWStructuredBuffer<float3> velocities;
+RWStructuredBuffer<float3> sorted_velocities;
+RWStructuredBuffer<float3> predicted_velocities;
+RWStructuredBuffer<float3> sorted_predicted_velocities;
+globallycoherent RWStructuredBuffer<int> bins;
+RWStructuredBuffer<int> prefix_sums;
+int bin_count;
+float cell_size;
+uint3 grid_dimensions;
+
+[numthreads(1024, 1, 1)]
+void ResetPrefixSumsAndBins(uint3 id : SV_DispatchThreadID) {
+    if((int)id.x >= bin_count) return;
+    bins[id.x] = 0;
+    prefix_sums[id.x] = 0;
+}
+
+[numthreads(32, 1, 1)]
+void DistributeParticles(uint3 id : SV_DispatchThreadID) {
+    float3 pos = positions[id.x];
+    int3 grid_pos = pos / cell_size;
+    particles[id.x].bin =
+        (grid_pos.z * grid_dimensions.x * grid_dimensions.y) +
+        (grid_pos.y * grid_dimensions.x) +
+        grid_pos.x;
+    InterlockedAdd(bins[particles[id.x].bin], 1, particles[id.x].index);
+}
+
+[numthreads(1, 1, 1)]
+void CalculatePrefixSums() {
+    int total = 0;
+    for(int i = 0; i < bin_count; ++i) {
+        prefix_sums[i] = total;
+        total += bins[i];
+    }
+}
+
+[numthreads(32, 1, 1)]
+void CopyParticles(uint3 id : SV_DispatchThreadID) {
+    Particle p = particles[id.x];
+    float3 pos = positions[id.x];
+    uint sorted_idx = prefix_sums[p.bin] + p.index;
+    sorted_particles[sorted_idx] = p;
+    sorted_positions[sorted_idx] = pos;
+    sorted_velocities[sorted_idx] = velocities[id.x];
+}
+
+[numthreads(32, 1, 1)]
+void CopyBoundaryParticles(uint3 id : SV_DispatchThreadID) {
+    Particle p = particles[id.x];
+    float3 pos = positions[id.x];
+    uint sorted_idx = prefix_sums[p.bin] + p.index;
+    sorted_particles[sorted_idx] = p;
+    sorted_positions[sorted_idx] = pos;
+}
+

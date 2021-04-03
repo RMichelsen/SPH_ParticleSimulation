@@ -1,0 +1,349 @@
+#pragma kernel ComputeBoundaryVolume
+#pragma kernel CalculateDensityPressure
+#pragma kernel CalculateForces
+#pragma kernel CalculateSurfaceTensionForce
+#pragma kernel PerformTimeIntegration
+
+struct Particle {
+    int bin;
+    int index;
+};
+
+StructuredBuffer<int> bins;
+StructuredBuffer<int> prefix_sums;
+StructuredBuffer<int> boundary_bins;
+StructuredBuffer<int> boundary_prefix_sums;
+RWStructuredBuffer<float3> positions;
+RWStructuredBuffer<float3> sorted_positions;
+StructuredBuffer<float3> sorted_boundary_positions;
+RWStructuredBuffer<float> boundary_volume;
+RWStructuredBuffer<float3> predicted_positions;
+RWStructuredBuffer<float3> velocities;
+RWStructuredBuffer<float3> sorted_velocities;
+RWStructuredBuffer<float3> predicted_velocities;
+RWStructuredBuffer<float> pressures;
+RWStructuredBuffer<float> densities;
+RWStructuredBuffer<float3> color_gradients;
+RWStructuredBuffer<float3> forces;
+RWStructuredBuffer<int> surface_identifiers;
+RWStructuredBuffer<uint4> cell_tags;
+float rest_density;
+float particle_mass;
+float stiffness;
+float viscosity;
+float dt;
+float h;
+float3 bounds;
+float cell_size;
+int3 grid_dimensions;
+float mc_cell_size;
+int3 mc_grid_dimensions;
+int bin_count;
+int particle_count;
+
+#define PI 3.14159265358979323846f 
+#define EPSILON 1e-6f
+
+// [Monaghan 2005] Cubic spline kernel and derivative
+float W(float3 x_ij) {
+    float r = length(x_ij);
+    float x = r / h;
+    if(x < 1.0f) {
+        return (1.0f / (PI * h * h * h)) * (1.0f - (1.5f * x * x) + (0.75f * x * x * x));
+    }
+    else if(x < 2.0f) {
+        return (1.0f / (PI * h * h * h)) * (0.25f * (2.0f - x) * (2.0f - x) * (2.0f - x));
+    }
+    else {
+        return 0.0f;
+    }
+}
+float3 DW(float3 x_ij) {
+    float r = length(x_ij);
+    if(r < EPSILON) {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    float x = r / h;
+    if(x < 1.0f) {
+        return (1.0f / (PI * h * h * h * h)) * ((2.25 * x * x) - (3.0f * x)) * (x_ij / r);
+    }
+    else if(x < 2.0f) {
+        return (1.0f / (PI * h * h * h * h)) * (-0.75f * (2.0f - x) * (2.0f - x)) * (x_ij / r);
+    }
+    else {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+}
+
+// [Akinci 2012] Boundary contribution
+[numthreads(32, 1, 1)]
+void ComputeBoundaryVolume(uint3 id : SV_DispatchThreadID) {
+    if((int)id.x >= particle_count) return;
+    float3 bx_i = sorted_boundary_positions[id.x];
+    int x = (int)(bx_i.x / cell_size);
+    int y = (int)(bx_i.y / cell_size);
+    int z = (int)(bx_i.z / cell_size);
+
+    float volume = 0.0f;
+    for(int i = -1; i <= 1; ++i) {
+        if(z + i < 0 || z + i >= grid_dimensions.z) continue;
+        for(int j = -1; j <= 1; ++j) {
+            if(y + j < 0 || y + j >= grid_dimensions.y) continue;
+            for(int k = -1; k <= 1; ++k) {
+                if(x + k < 0 || x + k >= grid_dimensions.x) continue;
+                int bin_index = ((z + i) * grid_dimensions.x * grid_dimensions.y) + ((y + j) * grid_dimensions.x) + (x + k);
+                int size = boundary_bins[bin_index];
+                int offset = boundary_prefix_sums[bin_index];
+                for(int l = 0; l < size; ++l) {
+                    float3 bx_j = sorted_boundary_positions[offset + l];
+                    float3 bx_ij = bx_i - bx_j;
+                    if(dot(bx_ij, bx_ij) > cell_size * cell_size) continue;
+
+                    volume += W(bx_ij);
+                }
+            }
+        }
+    }
+
+    boundary_volume[id.x] = 1.0f / volume;
+}
+
+[numthreads(32, 1, 1)]
+void CalculateDensityPressure(uint3 id : SV_DispatchThreadID) {
+    float3 x_i = sorted_positions[id.x];
+    int x = (int)(x_i.x / cell_size);
+    int y = (int)(x_i.y / cell_size);
+    int z = (int)(x_i.z / cell_size);
+
+    densities[id.x] = 0.0f;
+    for(int i = -1; i <= 1; ++i) {
+        if(z + i < 0 || z + i >= grid_dimensions.z) continue;
+        for(int j = -1; j <= 1; ++j) {
+            if(y + j < 0 || y + j >= grid_dimensions.y) continue;
+            for(int k = -1; k <= 1; ++k) {
+                if(x + k < 0 || x + k >= grid_dimensions.x) continue;
+                int bin_index = ((z + i) * grid_dimensions.x * grid_dimensions.y) + ((y + j) * grid_dimensions.x) + (x + k);
+				int size = bins[bin_index];
+				int offset = prefix_sums[bin_index];
+
+
+				for(int l = 0; l < size; ++l) {
+					float3 x_j = sorted_positions[offset + l];
+					float3 x_ij = x_i - x_j;
+					if(dot(x_ij, x_ij) > cell_size * cell_size) continue;
+
+					densities[id.x] += particle_mass * W(x_ij);
+				}
+
+                int size2 = boundary_bins[bin_index];
+                int offset2 = boundary_prefix_sums[bin_index];
+                for(int l2 = 0; l2 < size2; ++l2) {
+                    float3 bx_j = sorted_boundary_positions[offset2 + l2];
+                    float3 bx_ij = x_i - bx_j;
+                    if(dot(bx_ij, bx_ij) > cell_size * cell_size) continue;
+
+                    densities[id.x] += boundary_volume[offset2 + l2] * rest_density * W(bx_ij);
+                }
+            }
+        }
+    }
+
+    if(densities[id.x] == 0.0f) {
+        densities[id.x] = rest_density;
+    }
+    float rho = densities[id.x] / rest_density;
+    float pressure = (stiffness * rest_density / 7.0f) * ((rho * rho * rho * rho * rho * rho * rho) - 1.0f);
+    pressures[id.x] = max(pressure, 0.0f);
+}
+
+int EvaluateForces(uint3 id, out float3 F_pressure, out float3 F_viscosity, out float3 color_gradient) {
+    float3 x_i = sorted_positions[id.x];
+    int x = (int)(x_i.x / cell_size);
+    int y = (int)(x_i.y / cell_size);
+    int z = (int)(x_i.z / cell_size);
+
+    float3 v_i = sorted_velocities[id.x];
+    float p_i = pressures[id.x];
+    float rho_i = densities[id.x];
+    float rho_i2 = rho_i * rho_i;
+    float p_rho_i2 = p_i / rho_i2;
+    float one_rho_i2 = 1.0 / rho_i2;
+
+    F_pressure = float3(0.0f, 0.0f, 0.0f);
+    F_viscosity = float3(0.0f, 0.0f, 0.0f);
+    color_gradient = float3(0.0f, 0.0f, 0.0f);
+    int num_neighbours = 0;
+    for(int i = -1; i <= 1; ++i) {
+        if(z + i < 0 || z + i >= grid_dimensions.z) continue;
+        for(int j = -1; j <= 1; ++j) {
+			if(y + j < 0 || y + j >= grid_dimensions.y) continue;
+            for(int k = -1; k <= 1; ++k) {
+                if(x + k < 0 || x + k >= grid_dimensions.x) continue;
+                int bin_index = ((z + i) * grid_dimensions.x * grid_dimensions.y) + ((y + j) * grid_dimensions.x) + (x + k);
+				int size = bins[bin_index];
+				int offset = prefix_sums[bin_index];
+
+                for(int l = 0; l < size; ++l) {
+                    float3 x_j = sorted_positions[offset + l];
+                    float3 x_ij = x_i - x_j;
+                    if((int)id.x == offset + l) continue;
+                    if(dot(x_ij, x_ij) > cell_size * cell_size) continue;
+
+                    float p_j = pressures[offset + l];
+                    float rho_j = densities[offset + l];
+                    float rho_j2 = rho_j * rho_j;
+                    float p_rho_j2 = p_j / rho_j2;
+                    float one_rho_j2 = 1.0 / rho_j2;
+                    float3 v_ij = v_i - sorted_velocities[offset + l];
+
+                    float3 d_kernel = DW(x_ij);
+                    F_viscosity += (particle_mass / rho_j) * v_ij * particle_mass * viscosity * 2.0f * (dot(x_ij, d_kernel) / (dot(x_ij, x_ij) + 0.01f * h * h));
+                    F_pressure += -(particle_mass / rho_i) * rho_i * particle_mass * (p_rho_i2 + p_rho_j2) * d_kernel;
+                    color_gradient += rho_i * particle_mass * (one_rho_i2 + one_rho_j2) * d_kernel;
+                    ++num_neighbours;
+                }
+
+                int size2 = boundary_bins[bin_index];
+                int offset2 = boundary_prefix_sums[bin_index];
+                for(int l2 = 0; l2 < size2; ++l2) {
+                    float3 bx_j = sorted_boundary_positions[offset2 + l2];
+                    float3 bx_ij = x_i - bx_j;
+
+                    float p_j = p_i;
+                    float rho_j2 = rest_density * rest_density;
+                    float p_rho_j2 = p_j / rho_j2;
+                    if(dot(bx_ij, bx_ij) > cell_size * cell_size) continue;
+
+                    F_pressure += -boundary_volume[offset2 + l2] * rho_i * particle_mass * (p_rho_i2 + p_rho_j2) * DW(bx_ij);
+                }
+            }
+        }
+    }
+
+    float L = 10.0f;
+    return length(color_gradient) > L || num_neighbours < 20;
+}
+
+[numthreads(32, 1, 1)]
+void CalculateForces(uint3 id : SV_DispatchThreadID) {
+    // Compute pressure forces, viscosity and color field in a single loop
+    float3 F_gravity = particle_mass * float3(0.0f, -9.81f, 0.0f);
+    float3 F_pressure, F_viscosity, color_gradient;
+    bool on_surface = EvaluateForces(id, F_pressure, F_viscosity, color_gradient);
+    color_gradients[id.x] = color_gradient;
+    forces[id.x] = F_pressure + F_viscosity + F_gravity;
+
+    if(on_surface) {
+        surface_identifiers[id.x] = 1;
+    }
+    else {
+        surface_identifiers[id.x] = 0;
+    }
+}
+
+// Surface tension as proposed in [He 2014]
+[numthreads(32, 1, 1)]
+void CalculateSurfaceTensionForce(uint3 id : SV_DispatchThreadID) {
+    float3 x_i = sorted_positions[id.x];
+    int x = (int)(x_i.x / cell_size);
+    int y = (int)(x_i.y / cell_size);
+    int z = (int)(x_i.z / cell_size);
+
+    float3 c_i = color_gradients[id.x];
+    float lc_i_sq = dot(c_i, c_i);
+    float rho_i = densities[id.x];
+    float V_i = particle_mass / rho_i;
+
+    float3 F_surface_tension = float3(0.0f, 0.0f, 0.0f);
+    float kappa = 0.05f;
+    float energy_coeff = kappa * 0.5f;
+    for(int i = -1; i <= 1; ++i) {
+        if(z + i < 0 || z + i >= grid_dimensions.z) continue;
+        for(int j = -1; j <= 1; ++j) {
+            if(y + j < 0 || y + j >= grid_dimensions.y) continue;
+            for(int k = -1; k <= 1; ++k) {
+                if(x + k < 0 || x + k >= grid_dimensions.x) continue;
+                int bin_index = ((z + i) * grid_dimensions.x * grid_dimensions.y) + ((y + j) * grid_dimensions.x) + (x + k);
+                int size = bins[bin_index];
+                int offset = prefix_sums[bin_index];
+
+                for(int l = 0; l < size; ++l) {
+                    float3 x_j = sorted_positions[offset + l];
+                    float3 x_ij = x_i - x_j;
+                    if((int)id.x == offset + l) continue;
+                    if(dot(x_ij, x_ij) > cell_size * cell_size) continue;
+
+                    float3 c_j = color_gradients[offset + l];
+                    float rho_j = densities[offset + l];
+                    float V_j = particle_mass / rho_j;
+
+                    float3 d_kernel = DW(x_ij);
+                    F_surface_tension += energy_coeff * V_i * V_j * ((lc_i_sq + dot(c_j, c_j)) * 0.5f) * d_kernel;
+                }
+            }
+        }
+    }
+
+    forces[id.x] += F_surface_tension;
+}
+
+[numthreads(32, 1, 1)]
+void PerformTimeIntegration(uint3 id : SV_DispatchThreadID) {
+    float3 velocity = sorted_velocities[id.x] + (dt * forces[id.x]) / particle_mass;
+    velocities[id.x] = velocity;
+    positions[id.x] = sorted_positions[id.x] + (dt * velocity);
+
+    float boundary_offset = h * 1.5f;
+
+    // Boundaries
+    if(positions[id.x].x <= 0.0f + boundary_offset) {
+        positions[id.x].x = 0.0f + boundary_offset;
+        velocities[id.x].x = max(velocities[id.x].x, 0.0f);
+    }
+    if(positions[id.x].y <= 0.0f + boundary_offset) {
+        positions[id.x].y = 0.0f + boundary_offset;
+        velocities[id.x].y = max(velocities[id.x].y, 0.0f);
+    }
+    if(positions[id.x].z <= 0.0f + boundary_offset) {
+        positions[id.x].z = 0.0f + boundary_offset;
+        velocities[id.x].z = max(velocities[id.x].z, 0.0f);
+    }
+    if(positions[id.x].x >= bounds.x - boundary_offset) {
+        positions[id.x].x = bounds.x - boundary_offset;
+        velocities[id.x].x = min(velocities[id.x].x, 0.0f);
+    }
+    if(positions[id.x].y >= bounds.y - boundary_offset) {
+        positions[id.x].y = bounds.y - boundary_offset;
+        velocities[id.x].y = min(velocities[id.x].y, 0.0f);
+    }
+    if(positions[id.x].z >= bounds.z - boundary_offset) {
+        positions[id.x].z = bounds.z - boundary_offset;
+        velocities[id.x].z = min(velocities[id.x].z, 0.0f);
+    }
+
+    if(surface_identifiers[id.x] == 0) {
+        return;
+    }
+
+    float3 pos = positions[id.x];
+    int x = (int)(pos.x / mc_cell_size);
+    int y = (int)(pos.y / mc_cell_size);
+    int z = (int)(pos.z / mc_cell_size);
+    for(int i = -3; i <= 3; ++i) {
+        if(z + i < 0 || z + i >= mc_grid_dimensions.z) continue;
+        for(int j = -3; j <= 3; ++j) {
+            if(y + j < 0 || y + j >= mc_grid_dimensions.y) continue;
+            for(int k = -3; k <= 3; ++k) {
+                if(x + k < 0 || x + k >= mc_grid_dimensions.x) continue;
+
+                int flat_index = ((z + i) * mc_grid_dimensions.x * mc_grid_dimensions.y) +
+								 ((y + j) * mc_grid_dimensions.x) +
+								 (x + k);
+
+                cell_tags[flat_index].xyz = uint3(x + k, y + j, z + i);
+                cell_tags[flat_index].w += 1;
+            }
+        }
+    }
+}
+

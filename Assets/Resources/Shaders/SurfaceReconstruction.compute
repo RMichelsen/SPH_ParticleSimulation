@@ -1,0 +1,298 @@
+#pragma kernel ConvertCellTags
+#pragma kernel SetTriangulateArgs
+#pragma kernel CalculateScalarField
+#pragma kernel TriangulateCells
+#pragma kernel FillIndirectArgs
+
+struct Triangle {
+    float3 v0;
+    float3 n0;
+
+    float3 v1;
+    float3 n1;
+
+    float3 v2;
+    float3 n2;
+};
+
+RWStructuredBuffer<int> bins;
+RWStructuredBuffer<int> prefix_sums;
+RWStructuredBuffer<float3> positions;
+RWStructuredBuffer<uint4> cell_tags;
+RWStructuredBuffer<float> scalar_field;
+AppendStructuredBuffer<uint3> cells_to_triangulate;
+StructuredBuffer<uint3> cells_to_triangulate_read;
+RWStructuredBuffer<uint> cells_to_triangulate_args;
+AppendStructuredBuffer<Triangle> triangulated_cells;
+StructuredBuffer<int> edge_table;
+StructuredBuffer<int> triangle_connection_table;
+RWStructuredBuffer<uint> draw_procedural_indirect_args;
+float timestep;
+float particle_radius;
+float cell_size;
+uint3 grid_dimensions;
+float mc_cell_size;
+uint3 mc_grid_dimensions;
+uint mc_num_grid_points;
+bool use_eigenvalue;
+
+#define EPSILON 1e-6f
+#define PI 3.14159265358979323846f
+#define T_LOW 0.5f
+#define T_HIGH 2.5f
+
+int get_vertex_flat_index(uint3 pos) {
+    return (int)((pos.z * mc_grid_dimensions.x * mc_grid_dimensions.y) + (pos.y * mc_grid_dimensions.x) + pos.x);
+}
+
+[numthreads(1024, 1, 1)]
+void ConvertCellTags(uint3 id : SV_DispatchThreadID) {
+    if(id.x >= mc_num_grid_points) return;
+
+    uint4 cell_tag = cell_tags[id.x];
+    if(cell_tag.w > 0) {
+        cells_to_triangulate.Append(cell_tag.xyz);
+    }
+
+    cell_tags[id.x].w = 0;
+}
+
+[numthreads(1, 1, 1)]
+void SetTriangulateArgs(uint3 id : SV_DispatchThreadID) {
+    cells_to_triangulate_args[0] = uint(ceil(cells_to_triangulate_args[0] / 1024.0f));
+    cells_to_triangulate_args[1] = 1;
+    cells_to_triangulate_args[2] = 1;
+}
+
+float kernel(float s) {
+    float s2 = s * s;
+    return max(0.0, (1.0 - s2) * (1.0 - s2) * (1.0 - s2));
+}
+
+[numthreads(1024, 1, 1)]
+void CalculateScalarField(uint3 id : SV_DispatchThreadID) {
+    uint3 cell = cells_to_triangulate_read[id.x];
+    if(cell.x >= mc_grid_dimensions.x || 
+       cell.y >= mc_grid_dimensions.y || 
+       cell.z >= mc_grid_dimensions.z) {
+        return;
+    }
+    int flat_index = get_vertex_flat_index(cell);
+
+    // Point on marching cubes grid
+    float3 x_i = float3(cell.x * mc_cell_size, cell.y * mc_cell_size, cell.z * mc_cell_size);
+    int x = (int)(x_i.x / cell_size);
+    int y = (int)(x_i.y / cell_size);
+    int z = (int)(x_i.z / cell_size);
+
+    // 4r = cell_size of the spatial data structure for neighbourhood searches
+    float r = particle_radius;
+    float R = r * 4.0f;
+    float R2 = R * R;
+
+    float3 wa_nom = float3(0.0f, 0.0f, 0.0f);
+    float wa_denom = 0.0f;
+    for(int i = -2; i <= 2; ++i) {
+        if(z + i < 0 || z + i >= (int)grid_dimensions.z) continue;
+        for(int j = -2; j <= 2; ++j) {
+            if(y + j < 0 || y + j >= (int)grid_dimensions.y) continue;
+            for(int k = -2; k <= 2; ++k) {
+                if(x + k < 0 || x + k >= (int)grid_dimensions.x) continue;
+                int bin_index = ((z + i) * (int)grid_dimensions.x * (int)grid_dimensions.y) + ((y + j) * (int)grid_dimensions.x) + (x + k);
+                int size = bins[bin_index];
+                int offset = prefix_sums[bin_index];
+
+                for(int l = 0; l < size; ++l) {
+                    float3 x_j = positions[offset + l];
+                    float3 x_ij = x_i - x_j;
+                    if(dot(x_ij, x_ij) > R2) continue;
+
+                    float contrib = kernel(length(x_ij) / R);
+                    wa_nom += x_j * contrib;
+                    wa_denom += contrib;
+                }
+            }
+        }
+    }
+    
+    float3 x_weighted_average = max(wa_nom / wa_denom, float3(0.0f, 0.0f, 0.0f));
+    float phi = length(x_i - x_weighted_average) - r;
+    scalar_field[flat_index] = phi;
+}
+
+float3 midpoint(float3 a, float3 b, float c, float d) {
+    return float3((a.x + b.x) / 2.0f, (a.y + b.y) / 2.0f, (a.z + b.z) / 2.0f);
+}
+
+float3 interpolate(float3 v0, float3 v1, float val1, float val2) {
+    float mu;
+    float3 v;
+
+    if(abs(0.0f - val1) < 0.00001f)
+        return v0;
+    if(abs(0.0f - val2) < 0.00001f)
+        return v1;
+    if(abs(val1 - val2) < 0.00001f)
+        return v1;
+    mu = (0.0f - val1) / (val2 - val1);
+    v.x = v0.x + mu * (v1.x - v0.x);
+    v.y = v0.y + mu * (v1.y - v0.y);
+    v.z = v0.z + mu * (v1.z - v0.z);
+
+    return v;
+}
+
+float3 compute_scalar_field_gradient(uint3 id) {
+    bool x_edge = id.x == 0;
+    bool y_edge = id.y == 0;
+    bool z_edge = id.z == 0;
+    float r = mc_cell_size;
+
+    float x0 = scalar_field[get_vertex_flat_index(id + uint3(-((int)!x_edge), 0, 0))];
+    float x1 = scalar_field[get_vertex_flat_index(id + uint3(1, 0, 0))];
+    float x = (x1 - x0) / (x_edge ? r : 2 * r);
+
+    float y0 = scalar_field[get_vertex_flat_index(id + uint3(0, -((int)!y_edge), 0))];
+    float y1 = scalar_field[get_vertex_flat_index(id + uint3(0, 1, 0))];
+    float y = (y1 - y0) / (y_edge ? r : 2 * r);
+
+    float z0 = scalar_field[get_vertex_flat_index(id + uint3(0, 0, -((int)!z_edge)))];
+    float z1 = scalar_field[get_vertex_flat_index(id + uint3(0, 0, 1))];
+    float z = (z1 - z0) / (z_edge ? r : 2 * r);
+
+    float3 N = float3(x, y, z);
+    if(isnan(N.x)) N.x = EPSILON;
+    if(isnan(N.y)) N.y = EPSILON;
+    if(isnan(N.z)) N.z = EPSILON;
+    return normalize(N);
+}
+
+[numthreads(1024, 1, 1)]
+void TriangulateCells(uint3 id : SV_DispatchThreadID) {
+    uint3 cell = cells_to_triangulate_read[id.x];
+    if(cell.x >= mc_grid_dimensions.x ||
+       cell.y >= mc_grid_dimensions.y ||
+       cell.z >= mc_grid_dimensions.z) {
+        return;
+    }
+
+	uint3 v0_idx = cell + uint3(0, 0, 0);
+	uint3 v1_idx = cell + uint3(1, 0, 0);
+	uint3 v2_idx = cell + uint3(1, 1, 0);
+	uint3 v3_idx = cell + uint3(0, 1, 0);
+	uint3 v4_idx = cell + uint3(0, 0, 1);
+	uint3 v5_idx = cell + uint3(1, 0, 1);
+	uint3 v6_idx = cell + uint3(1, 1, 1);
+	uint3 v7_idx = cell + uint3(0, 1, 1);
+    float3 v0_pos = v0_idx * mc_cell_size;
+    float3 v1_pos = v1_idx * mc_cell_size;
+    float3 v2_pos = v2_idx * mc_cell_size;
+    float3 v3_pos = v3_idx * mc_cell_size;
+    float3 v4_pos = v4_idx * mc_cell_size;
+    float3 v5_pos = v5_idx * mc_cell_size;
+    float3 v6_pos = v6_idx * mc_cell_size;
+    float3 v7_pos = v7_idx * mc_cell_size;
+    float3 v0_norm = compute_scalar_field_gradient(v0_idx);
+    float3 v1_norm = compute_scalar_field_gradient(v1_idx);
+    float3 v2_norm = compute_scalar_field_gradient(v2_idx);
+    float3 v3_norm = compute_scalar_field_gradient(v3_idx);
+    float3 v4_norm = compute_scalar_field_gradient(v4_idx);
+    float3 v5_norm = compute_scalar_field_gradient(v5_idx);
+    float3 v6_norm = compute_scalar_field_gradient(v6_idx);
+    float3 v7_norm = compute_scalar_field_gradient(v7_idx);
+    float v0_scalar = scalar_field[get_vertex_flat_index(v0_idx)]; 
+	float v1_scalar = scalar_field[get_vertex_flat_index(v1_idx)];
+	float v2_scalar = scalar_field[get_vertex_flat_index(v2_idx)];
+	float v3_scalar = scalar_field[get_vertex_flat_index(v3_idx)];
+	float v4_scalar = scalar_field[get_vertex_flat_index(v4_idx)];
+	float v5_scalar = scalar_field[get_vertex_flat_index(v5_idx)];
+	float v6_scalar = scalar_field[get_vertex_flat_index(v6_idx)];
+	float v7_scalar = scalar_field[get_vertex_flat_index(v7_idx)];
+
+    // Triangulation criterion
+    bool pos = v0_scalar > 0.0f || v1_scalar > 0.0f || v2_scalar > 0.0f || v3_scalar > 0.0f ||
+			   v4_scalar > 0.0f || v5_scalar > 0.0f || v6_scalar > 0.0f || v7_scalar > 0.0f;
+    bool neg = v0_scalar < 0.0f || v1_scalar < 0.0f || v2_scalar < 0.0f || v3_scalar < 0.0f ||
+               v4_scalar < 0.0f || v5_scalar < 0.0f || v6_scalar < 0.0f || v7_scalar < 0.0f;
+    if(!pos || !neg) return;
+
+	int mc_case = 0;
+    if(v0_scalar > 0.0f) mc_case |= 1;
+    if(v1_scalar > 0.0f) mc_case |= 1 << 1;
+    if(v2_scalar > 0.0f) mc_case |= 1 << 2;
+    if(v3_scalar > 0.0f) mc_case |= 1 << 3;
+    if(v4_scalar > 0.0f) mc_case |= 1 << 4;
+    if(v5_scalar > 0.0f) mc_case |= 1 << 5;
+    if(v6_scalar > 0.0f) mc_case |= 1 << 6;
+    if(v7_scalar > 0.0f) mc_case |= 1 << 7;
+
+    float3 vertices[12];
+    float3 normals[12];
+    if(edge_table[mc_case] & 1) {
+        vertices[0] = interpolate(v0_pos, v1_pos, v0_scalar, v1_scalar);
+        normals[0] = interpolate(v0_norm, v1_norm, v0_scalar, v1_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 1) {
+        vertices[1] = interpolate(v1_pos, v2_pos, v1_scalar, v2_scalar);
+        normals[1] = interpolate(v1_norm, v2_norm, v1_scalar, v2_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 2) {
+        vertices[2] = interpolate(v2_pos, v3_pos, v2_scalar, v3_scalar);
+        normals[2] = interpolate(v2_norm, v3_norm, v2_scalar, v3_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 3) {
+        vertices[3] = interpolate(v3_pos, v0_pos, v3_scalar, v0_scalar);
+        normals[3] = interpolate(v3_norm, v0_norm, v3_scalar, v0_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 4) {
+        vertices[4] = interpolate(v4_pos, v5_pos, v4_scalar, v5_scalar);
+        normals[4] = interpolate(v4_norm, v5_norm, v4_scalar, v5_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 5) {
+        vertices[5] = interpolate(v5_pos, v6_pos, v5_scalar, v6_scalar);
+        normals[5] = interpolate(v5_norm, v6_norm, v5_scalar, v6_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 6) {
+        vertices[6] = interpolate(v6_pos, v7_pos, v6_scalar, v7_scalar);
+        normals[6] = interpolate(v6_norm, v7_norm, v6_scalar, v7_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 7) {
+        vertices[7] = interpolate(v7_pos, v4_pos, v7_scalar, v4_scalar);
+        normals[7] = interpolate(v7_norm, v4_norm, v7_scalar, v4_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 8) {
+        vertices[8] = interpolate(v0_pos, v4_pos, v0_scalar, v4_scalar);
+        normals[8] = interpolate(v0_norm, v4_norm, v0_scalar, v4_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 9) {
+        vertices[9] = interpolate(v1_pos, v5_pos, v1_scalar, v5_scalar);
+        normals[9] = interpolate(v1_norm, v5_norm, v1_scalar, v5_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 10) {
+        vertices[10] = interpolate(v2_pos, v6_pos, v2_scalar, v6_scalar);
+        normals[10] = interpolate(v2_norm, v6_norm, v2_scalar, v6_scalar);
+    }
+    if(edge_table[mc_case] & 1 << 11) {
+        vertices[11] = interpolate(v3_pos, v7_pos, v3_scalar, v7_scalar);
+        normals[11] = interpolate(v3_norm, v7_norm, v3_scalar, v7_scalar);
+    }
+
+    int connection_offset = mc_case * 16;
+    for(int i = 0; triangle_connection_table[connection_offset + i] != -1; i += 3) {
+        Triangle tri;
+        tri.v0 = vertices[triangle_connection_table[connection_offset + i]];
+        tri.v1 = vertices[triangle_connection_table[connection_offset + i + 1]];
+        tri.v2 = vertices[triangle_connection_table[connection_offset + i + 2]];
+        tri.n0 = normals[triangle_connection_table[connection_offset + i]];
+        tri.n1 = normals[triangle_connection_table[connection_offset + i + 1]];
+        tri.n2 = normals[triangle_connection_table[connection_offset + i + 2]];
+        triangulated_cells.Append(tri);
+    }
+}
+
+[numthreads(1, 1, 1)]
+void FillIndirectArgs() {
+    draw_procedural_indirect_args[0] *= 3;
+    draw_procedural_indirect_args[1] = 1;
+}
+

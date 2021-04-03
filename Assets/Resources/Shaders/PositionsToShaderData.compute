@@ -1,0 +1,39 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel PositionsToShaderData
+#pragma kernel McPositionsToShaderData
+
+struct IndirectShaderData {
+    float4x4 LocalToWorld;
+    float4x4 WorldToLocal;
+};
+
+RWStructuredBuffer<float3> positions;
+RWStructuredBuffer<float3> velocities;
+RWStructuredBuffer<float3> colors;
+RWStructuredBuffer<IndirectShaderData> _InstancedIndirectShaderData;
+float4x4 _LocalToWorld;
+float4x4 _WorldToLocal;
+float particle_radius;
+float visual_scale;
+
+[numthreads(32, 1, 1)]
+void PositionsToShaderData(uint3 id : SV_DispatchThreadID) {
+	float4 pos = float4(positions[id.x], 1.0f);
+
+	float v = dot(velocities[id.x], velocities[id.x]);
+	float3 no_velocity = float3(0.27, 0.44f, 0.95f);
+	float3 high_velocity = float3(1.0f, 1.0f, 1.0f);
+	colors[id.x] = lerp(no_velocity, high_velocity, v / 1.5f);
+
+    IndirectShaderData data;
+    data.LocalToWorld = _LocalToWorld;
+	data.LocalToWorld[0][3] += pos.x * visual_scale;
+	data.LocalToWorld[1][3] += pos.y * visual_scale;
+	data.LocalToWorld[2][3] += pos.z * visual_scale;
+	data.LocalToWorld[0][0] *= particle_radius * visual_scale;
+	data.LocalToWorld[1][1] *= particle_radius * visual_scale;
+	data.LocalToWorld[2][2] *= particle_radius * visual_scale;
+	data.WorldToLocal = data.LocalToWorld;
+	_InstancedIndirectShaderData[id.x] = data;
+}
+
