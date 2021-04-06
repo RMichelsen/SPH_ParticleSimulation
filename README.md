@@ -1,4 +1,5 @@
-# SPH Particle Simulation
+# SPH Particle Simulation - Implemented in Unity using compute shaders
+## Video
 [![](http://img.youtube.com/vi/5KDFAAYZNWA/0.jpg)](http://www.youtube.com/watch?v=5KDFAAYZNWA)
 
 # References
