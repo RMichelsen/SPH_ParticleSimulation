@@ -532,7 +532,7 @@ public class ParticleSpawner : MonoBehaviour {
             surfaceReconstruction.DispatchIndirect(kernel, cellsToTriangulateArgs, 0);
             Profiler.EndSample();
 
-            if (i % 16 == 0) {
+            if (i == 700) {
                 ComputeBuffer.CopyCount(triangulatedCells, countBuffer, 0);
                 int[] count = new int[1];
                 countBuffer.GetData(count);
@@ -579,7 +579,19 @@ public class ParticleSpawner : MonoBehaviour {
             }
         }
 
-        Vector3 center = new Vector3(bounds.x  / 2.0f, bounds.y / 2.0f, bounds.z / 2.0f);
+        //int steps = 5;        
+        //float step = bounds.x / 5.0f;
+
+        //for(int z = 0; z < steps; ++z) {
+        //    for(int y = 0; y < steps; ++y) {
+        //        for(int x = 0; x < steps; ++x) {
+        //            Vector3 cube = new Vector3(x, y, z) * step + new Vector3(step / 2.0f, step / 2.0f, step / 2.0f);
+        //            Gizmos.DrawWireCube(cube * visualScale, new Vector3(step * visualScale, step * visualScale, step * visualScale));
+        //        }
+        //    }
+        //}
+
+        Vector3 center = new Vector3(bounds.x / 2.0f, bounds.y / 2.0f, bounds.z / 2.0f);
         Gizmos.DrawWireCube(center * visualScale, (bounds - new float3(smoothingLength) * 2.0f) * visualScale);
     }
 
