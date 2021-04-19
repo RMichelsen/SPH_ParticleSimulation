@@ -1,5 +1,7 @@
 using System.Collections.Generic;
+using System.Runtime.Versioning;
 using Unity.Mathematics;
+using UnityEngine;
 using Random = Unity.Mathematics.Random;
 
 public struct Scenario {
@@ -34,6 +36,42 @@ public class Scenarios {
         return new Scenario {
             particlePositions = initialPositions,
             boundaryPositions = new List<float3>()
+        };
+    }
+
+    public static Scenario CubeWithBunny(float smoothingLength)
+    {
+        List<float3> initialPositions = new List<float3>();
+        float step = smoothingLength;
+        int xSteps = (int)(1.38f / step);
+        int ySteps = (int)(0.7f / step);
+        int zSteps = (int)(1.38f / step);
+        for (int z = 0; z < zSteps; ++z)
+        {
+            for (int y = 0; y < ySteps; ++y)
+            {
+                for (int x = 0; x < xSteps; ++x)
+                {
+                    initialPositions.Add((new float3(x, y, z) + new float3(1.5f)) * step + new float3(0.81f, 1.0f, 0.81f));
+                }
+            }
+        }
+
+        int remainingParticles = (32 - (initialPositions.Count % 32)) % 32;
+        for (int i = 0; i < remainingParticles; ++i)
+        {
+            initialPositions.Add(
+                new float3(0.81f, 1.0f, 0.81f) + rnd.NextFloat3(new float3(smoothingLength * 1.5f), new float3(1.38f, 0.7f, 1.38f) - new float3(smoothingLength * 1.5f))
+            );
+        }
+
+        GameObject bunny = Resources.Load<GameObject>("Meshes/bunny");
+        MeshFilter meshFilter = bunny.GetComponentInChildren<MeshFilter>();
+
+        return new Scenario
+        {
+            particlePositions = initialPositions,
+            boundaryPositions = Obstacles.GetBoundaryPositionsFromMesh(0.5f, new float3(1.4f, 0.0f, 1.4f), meshFilter.sharedMesh, smoothingLength)
         };
     }
 

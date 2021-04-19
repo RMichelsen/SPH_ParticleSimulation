@@ -32,6 +32,7 @@ public struct SimulateParticlesConstantBuffer {
 
 public enum ScenarioName {
     Cube,
+    CubeWithBunny,
     DamBreak,
     DoubleDamBreak,
     DamBreakWithBunny
@@ -75,6 +76,7 @@ public class ParticleSpawner : MonoBehaviour {
     private static readonly int binCount = gridDimensions.x * gridDimensions.y * gridDimensions.z;
     private int particleCount;
 
+    private int framez = 0;
     List<float3> positionsToDraw;
 
     private ComputeBuffer boundaryParticles;
@@ -459,6 +461,12 @@ public class ParticleSpawner : MonoBehaviour {
             case ScenarioName.Cube:
                 scenario = Scenarios.Cube(smoothingLength);
                 break;
+            case ScenarioName.CubeWithBunny:
+                scenario = Scenarios.CubeWithBunny(smoothingLength);
+                GameObject bunny = Resources.Load<GameObject>("Meshes/bunny");
+                MeshFilter meshFilter = bunny.GetComponentInChildren<MeshFilter>();
+                positionsToDraw = Obstacles.GetBoundaryPositionsFromMesh(0.5f, new float3(1.4f, 0.0f, 1.4f), meshFilter.sharedMesh, smoothingLength);
+                break;
             case ScenarioName.DamBreak:
                 scenario = Scenarios.DamBreak(smoothingLength);
                 break;
@@ -532,13 +540,13 @@ public class ParticleSpawner : MonoBehaviour {
             surfaceReconstruction.DispatchIndirect(kernel, cellsToTriangulateArgs, 0);
             Profiler.EndSample();
 
-            if (i == 700) {
+            if (i % 16 == 0) {
                 ComputeBuffer.CopyCount(triangulatedCells, countBuffer, 0);
                 int[] count = new int[1];
                 countBuffer.GetData(count);
                 float3x2[] vertices = new float3x2[count[0] * 3];
                 triangulatedCells.GetData(vertices);
-                ParticleMesher.WriteParticlesToDisk(vertices, destinationFolder + @"\" + string.Format("Particles_Frame{0:D3}", frame));
+                ParticleMesher.WriteParticlesToDisk(vertices, destinationFolder + @"\" + string.Format("Particles_Frame{0:D3}.obj", frame));
                 ++frame;
                 print("Recorded Frame " + frame);
             }
@@ -569,15 +577,17 @@ public class ParticleSpawner : MonoBehaviour {
         if (drawParticles) {
             DrawParticles();
         }
+
+        framez += pauseSimulation ? 0 : 1;
     }
 
     private void OnDrawGizmos() {
         Gizmos.color = Color.white;
-        if (positionsToDraw != null) {
-            foreach (float3 p in positionsToDraw) {
-                Gizmos.DrawSphere(p * visualScale, particleRadius * visualScale);
-            }
-        }
+        //if (positionsToDraw != null) {
+        //    foreach (float3 p in positionsToDraw) {
+        //        Gizmos.DrawSphere(p * visualScale, particleRadius * visualScale);
+        //    }
+        //}
 
         //int steps = 5;        
         //float step = bounds.x / 5.0f;
