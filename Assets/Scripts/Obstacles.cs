@@ -9,6 +9,26 @@ using Random = Unity.Mathematics.Random;
 public class Obstacles {
     static Random rnd = new Random(0xdeadbeef);
 
+    public static void AddCubeToBoundaries(float3 offset, float3 bounds, List<float3> boundaryPositions, float smoothingLength) {
+        //int3 dims = new int3(
+        //    (int)math.ceil((offset.x + bounds.x) / smoothingLength),
+        //    (int)math.ceil((offset.x + bounds.y) / smoothingLength),
+        //    (int)math.ceil((offset.x + bounds.z) / smoothingLength)
+        //);
+
+        int3 dims = (int3)math.ceil(bounds / smoothingLength);
+
+        for (int z = 0; z < dims.z; ++z) {
+            for (int y = 0; y < dims.y; ++y) {
+                for (int x = 0; x < dims.x; ++x) {
+                    if (x != 0 && y != 0 && z != 0 &&
+                       x != dims.x - 1 && y != dims.y - 1 && z != dims.z - 1) continue;
+                    boundaryPositions.Add(offset + (new float3(x, y, z) + new float3(0.5f)) * smoothingLength);
+                }
+            }
+        }
+    }
+
     static List<float> GetTriangleCDFTable(List<Vector3> vertices) {
         List<float> triangleCDFTable = new List<float>();
         float totalSurfaceArea = 0.0f;

@@ -35,7 +35,8 @@ public enum ScenarioName {
     CubeWithBunny,
     DamBreak,
     DoubleDamBreak,
-    DamBreakWithBunny
+    DamBreakWithBunny,
+    FloodWithCubes
 }
 
 public class ParticleSpawner : MonoBehaviour {
@@ -76,7 +77,6 @@ public class ParticleSpawner : MonoBehaviour {
     private static readonly int binCount = gridDimensions.x * gridDimensions.y * gridDimensions.z;
     private int particleCount;
 
-    private int framez = 0;
     List<float3> positionsToDraw;
 
     private ComputeBuffer boundaryParticles;
@@ -187,20 +187,7 @@ public class ParticleSpawner : MonoBehaviour {
     }
 
     void InitializeBoundaries(List<float3> initBoundaryPositions) {
-        int3 dims = new int3(
-            (int)math.ceil(bounds.x / smoothingLength),
-            (int)math.ceil(bounds.y / smoothingLength),
-            (int)math.ceil(bounds.z / smoothingLength)
-        );
-        for (int z = 0; z < dims.z; ++z) {
-            for (int y = 0; y < dims.y; ++y) {
-                for (int x = 0; x < dims.x; ++x) {
-                    if (x != 0 && y != 0 && z != 0 &&
-                       x != dims.x - 1 && y != dims.y - 1 && z != dims.z - 1) continue;
-                    initBoundaryPositions.Add((new float3(x, y, z) + new float3(0.5f)) * smoothingLength);
-                }
-            }
-        }
+        Obstacles.AddCubeToBoundaries(new float3(0.0f, 0.0f, 0.0f), bounds, initBoundaryPositions, smoothingLength);
         ComputeBuffer initialBoundaryParticles = new ComputeBuffer(initBoundaryPositions.Count, sizeof(int) * 2);
         ComputeBuffer initialBoundaryPositions = new ComputeBuffer(initBoundaryPositions.Count, sizeof(float) * 3);
         initialBoundaryPositions.SetData(initBoundaryPositions);
@@ -476,6 +463,9 @@ public class ParticleSpawner : MonoBehaviour {
             case ScenarioName.DamBreakWithBunny:
                 scenario = Scenarios.DoubleDamBreak(smoothingLength);
                 break;
+            case ScenarioName.FloodWithCubes:
+                scenario = Scenarios.FloodWithCubes(smoothingLength);
+                break;
             default:
                 scenario = Scenarios.DamBreak(smoothingLength);
                 break;
@@ -484,7 +474,6 @@ public class ParticleSpawner : MonoBehaviour {
         SetSimulationParameters(scenario.particlePositions);
         InitializeComputeBuffers(scenario.particlePositions);
         InitializeBoundaries(scenario.boundaryPositions);
-
     }
 
     void RecordFrames() {
@@ -556,7 +545,7 @@ public class ParticleSpawner : MonoBehaviour {
     }
 
     void Update() {
-        if(recordingDone) {
+        if (recordingDone) {
             return;
         }
 
@@ -577,8 +566,6 @@ public class ParticleSpawner : MonoBehaviour {
         if (drawParticles) {
             DrawParticles();
         }
-
-        framez += pauseSimulation ? 0 : 1;
     }
 
     private void OnDrawGizmos() {
@@ -589,12 +576,12 @@ public class ParticleSpawner : MonoBehaviour {
         //    }
         //}
 
-        //int steps = 5;        
-        //float step = bounds.x / 5.0f;
+        //int steps = 15;
+        //float step = bounds.x / 15.0f;
 
-        //for(int z = 0; z < steps; ++z) {
-        //    for(int y = 0; y < steps; ++y) {
-        //        for(int x = 0; x < steps; ++x) {
+        //for (int z = 0; z < steps; ++z) {
+        //    for (int y = 0; y < steps; ++y) {
+        //        for (int x = 0; x < steps; ++x) {
         //            Vector3 cube = new Vector3(x, y, z) * step + new Vector3(step / 2.0f, step / 2.0f, step / 2.0f);
         //            Gizmos.DrawWireCube(cube * visualScale, new Vector3(step * visualScale, step * visualScale, step * visualScale));
         //        }
