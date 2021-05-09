@@ -1,6 +1,6 @@
 # SPH Particle Simulation - Implemented in Unity using compute shaders
 ## Video
-[![](http://img.youtube.com/vi/FDFmuvTsDFE/0.jpg)](https://www.youtube.com/watch?v=FDFmuvTsDFE)
+[![](http://img.youtube.com/vi/uaoT37-NhCE/0.jpg)](https://www.youtube.com/watch?v=uaoT37-NhCE)
 
 # References
 - [Markus Ihmsen, Jens Orthmann, Barbara Solenthaler, Andreas Kolb, Matthias Teschner: SPH Fluids in Computer Graphics](https://cg.informatik.uni-freiburg.de/publications/2014_EG_SPH_STAR.pdf)

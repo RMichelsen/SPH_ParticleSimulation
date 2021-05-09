@@ -625,13 +625,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 2c0fb75837d5f644f90227e8f590a531, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  scenarioName: 1
+  scenarioName: 5
   record: 0
   particleMesh: {fileID: 4300000, guid: fecfc265517487b428551f24435d0716, type: 2}
   particleMaterial: {fileID: 2100000, guid: 3cedd58f9b7519c4b9581073dd620dea, type: 2}
   surfaceMaterial: {fileID: 2100000, guid: ae52d8bd2645f3d479440343d15919f0, type: 2}
   mcGridMaterial: {fileID: 2100000, guid: e61762aa3d2a30745aabd64b64496d3d, type: 2}
-  pauseSimulation: 0
+  pauseSimulation: 1
   drawSurface: 0
   drawParticles: 1
 --- !u!4 &1220547646
